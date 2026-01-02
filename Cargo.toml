@@ -1,0 +1,22 @@
+[package]
+name = "rsndt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# math
+nalgebra = "0.34.1"
+
+# parallelism
+rayon = "1.10"
+
+# point cloud
+pcd-rs = "0.12"
+
+# visualization
+rerun = "0.28"
+
+# utilities
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
