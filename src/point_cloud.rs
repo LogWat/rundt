@@ -23,11 +23,11 @@ impl PointCloud {
         self.points.is_empty()
     }
 
-    pub fn Transform(&self, transform: &Transform) -> Self {
+    pub fn transform(&self, transform: &Transform) -> Self {
         let transformed_points: Vec<Point> = self
             .points
             .par_iter()
-            .map(|p| transform.transform_point(p))
+            .map(|p| transform * p)
             .collect();
         Self::new(transformed_points)
     }
