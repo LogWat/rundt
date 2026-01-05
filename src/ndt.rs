@@ -77,15 +77,15 @@ impl NDTMatcher {
                 );
                 
             // solve for delta_x: H * delta_x = -g
-            let mut h_positive = -hessian;
+            let mut h_copy = hessian;
             let lambda = 0.01; // damping factor (0.1 ~ 10.0)
             for k in 0..6 {
-                h_positive[(k, k)] += lambda;
+                h_copy[(k, k)] += lambda;
             }
 
-            match h_positive.try_inverse() {
+            match h_copy.try_inverse() {
                 Some(h_inv) => {
-                    let delta = h_inv * gradient;
+                    let delta = h_inv * -gradient;
 
                     let delta_norm = delta.norm();
                     let final_delta = if delta_norm > 0.5 {
