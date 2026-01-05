@@ -16,10 +16,29 @@ pub struct NDTMatcher {
 impl NDTMatcher {
     pub fn new() -> Self {
         Self {
-            max_iterations: 30,
+            max_iterations: 50,
             epsilon: 1e-4,
             step_size: 1.0,
         }
+    }
+
+    pub fn set_max_iterations(&mut self, max_iter: usize) {
+        self.max_iterations = max_iter;
+    }
+    pub fn set_epsilon(&mut self, epsilon: Scalar) {
+        self.epsilon = epsilon;
+    }
+    pub fn set_step_size(&mut self, step_size: Scalar) {
+        self.step_size = step_size;
+    }
+    pub fn get_max_iterations(&self) -> usize {
+        self.max_iterations
+    }
+    pub fn get_epsilon(&self) -> Scalar {
+        self.epsilon
+    }
+    pub fn get_step_size(&self) -> Scalar {
+        self.step_size
     }
 
     pub fn align(
@@ -27,6 +46,7 @@ impl NDTMatcher {
         source: &PointCloud,
         target_grid: &VoxelGrid,
         init_guess: na::Isometry3<Scalar>,
+        verbose: bool,
     ) -> Option<na::Isometry3<Scalar>> {
         let mut current_transform = init_guess;
         for i in 0..self.max_iterations {
@@ -55,7 +75,7 @@ impl NDTMatcher {
                     || (Matrix6::zeros(), Vector6::zeros(), 0.0),
                     |(h1, g1, s1), (h2, g2, s2)| (h1 + h2, g1 + g2, s1 + s2)
                 );
-            
+                
             // solve for delta_x: H * delta_x = -g
             let mut h_positive = -hessian;
             let lambda = 0.01; // damping factor (0.1 ~ 10.0)
@@ -75,10 +95,15 @@ impl NDTMatcher {
                     };
 
                     Self::update_pose(&mut current_transform, &final_delta, self.step_size);
+                    if verbose {
+                        println!("Iteration {}: score = {}, delta = {:?}", i, score, final_delta);
+                    }
 
                     if delta_norm < self.epsilon {
-                        println!("Converged at iter {}", i);
-                        println!("Final score: {}", score);
+                        if verbose {
+                            println!("Converged at iter {}", i);
+                            println!("Final score: {}", score);
+                        }
                         break;
                     }
                 },
@@ -88,7 +113,9 @@ impl NDTMatcher {
                 }
             }
         }
-        println!("iterations finished.");
+        if verbose {
+            println!("iterations finished.");
+        }
         Some(current_transform)
     }
 
@@ -127,42 +154,50 @@ mod tests {
     use nalgebra as na;
     use approx::assert_relative_eq;
 
-    // 簡易的な立方体の点群を作成
     fn create_box_cloud() -> PointCloud {
         let mut points = Vec::new();
-        for x in -5..5 {
-            for y in -5..5 {
-                for z in 0..2 {
-                    points.push(Point::new(x as f64, y as f64, z as f64));
+        let step = 0.2;
+        let mut x = -0.8;
+        while x < 0.9 {
+            let mut y = -0.4;
+            while y < 0.5 {
+                let mut z = 0.0;
+                while z < 0.9 {
+                    points.push(Point::new(x, y, z));
+                    z += step;
                 }
+                y += step;
             }
+            x += step;
         }
         PointCloud::new(points)
     }
 
     #[test]
     fn test_ndt_convergence() {
-        let target_cloud = create_box_cloud();
+        let offset = na::Isometry3::translation(1.0, 1.0, 1.0);
+        let target_cloud = create_box_cloud().transform(&offset);
         
         let mut voxel_grid = VoxelGrid::new(2.0);
         voxel_grid.set_input_cloud(&target_cloud);
 
-        let source_cloud_origin = create_box_cloud();
+        let source_cloud_origin = target_cloud.clone();
         
-        // target: pos (0,0,0), rot (0,0,0)
-        // source: pos (0,0,0), rot (0,0,0)
+        // target: pos (1,1,1), rot (0,0,0)
+        // source: pos (1,1,1), rot (0,0,0)
         // initial guess: pos (0.5,0,0), rot (0,0,0.1)
-        // expected result: (0.0, 0.0, 0.0) translation and (0.0, 0.0, 0.0) rotation
+        // expected result: pos (0,0,0), rot (0,0,0)
         let ndt = NDTMatcher::new();
         
         // initial guess
-        let noise_translation = na::Translation3::new(0.5, 0.0, 0.0);
-        let noise_rotation = na::UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1);
+        let noise_translation = na::Translation3::new(0.7, 0.0, 0.0);
+        let noise_rotation = na::UnitQuaternion::from_euler_angles(0.0, 0.0, 0.15);
         let init_guess = na::Isometry3::from_parts(noise_translation, noise_rotation);
 
         // align
-        let result_pose = ndt.align(&source_cloud_origin, &voxel_grid, init_guess)
-            .expect("NDT alignment failed");
+        let result_pose = ndt.align(
+            &source_cloud_origin, &voxel_grid, init_guess, true
+        ).expect("NDT alignment failed");
 
         // 検証
         let expected_translation = na::Vector3::new(0.0, 0.0, 0.0);
