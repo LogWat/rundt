@@ -2,15 +2,22 @@
 use nalgebra as na;
 use rayon::prelude::*;
 use crate::point_cloud::{PointCloud, Point, Scalar};
-use crate::voxel_grid::VoxelGrid;
+use crate::voxel_grid::{VoxelGrid, VoxelKey};
 
 type Vector6 = na::SVector<Scalar, 6>;
 type Matrix6 = na::SMatrix<Scalar, 6, 6>;
+
+pub enum NeightborSearchMethod {
+    Single,
+    N27,
+    N7
+}
 
 pub struct NDTMatcher {
     max_iterations: usize,
     epsilon: Scalar,
     step_size: Scalar,
+    search_method: NeightborSearchMethod,
 }
 
 impl NDTMatcher {
@@ -19,6 +26,7 @@ impl NDTMatcher {
             max_iterations: 50,
             epsilon: 1e-4,
             step_size: 1.0,
+            search_method: NeightborSearchMethod::N27,
         }
     }
 
@@ -30,6 +38,9 @@ impl NDTMatcher {
     }
     pub fn set_step_size(&mut self, step_size: Scalar) {
         self.step_size = step_size;
+    }
+    pub fn set_search_method(&mut self, method: NeightborSearchMethod) {
+        self.search_method = method;
     }
     pub fn get_max_iterations(&self) -> usize {
         self.max_iterations
@@ -57,33 +68,63 @@ impl NDTMatcher {
             cb(0, &current_transform, 0.0);
         }
 
+        // let outlier_threshold = 0.05; // 確率密度がこれ以下なら勾配計算しない
         for i in 0..self.max_iterations {
             let (hessian, gradient, score) = source.points.par_iter()
                 .map(|point| {
                     let p_trans = current_transform * point;
-                    // Find corresponding voxel
-                    if let Some(voxel) = target_grid.get_voxel_at(&p_trans) {
-                        if !voxel.is_valid { return (Matrix6::zeros(), Vector6::zeros(), 0.0); }
-                        // 誤差vec
-                        let q = p_trans.coords - voxel.mean.coords;
-                        // E = exp(-0.5 * q^T * Sigma^-1 * q)
-                        let mahal = (q.transpose() * voxel.inv_cov * q)[0];
-                        let score_k = (-0.5 * mahal).max(-50.0).exp(); // avoid underflow
-                        // Jacobian
-                        let jacobian = Self::compute_point_jacobian(&p_trans);
-                        // 勾配 E * (q^T * Sigma^-1 * J)^T
-                        let g_k = -(q.transpose() * voxel.inv_cov * jacobian).transpose() * score_k;
-                        // hessian (近似) -E * (J^T * Sigma^-1 * J)
-                        let h_k = -score_k * (jacobian.transpose() * voxel.inv_cov * jacobian);
-                        return (h_k, g_k, score_k)
+                    let center_key = target_grid.point_to_key(&p_trans);
+
+                    let mut search_voxel_keys: Vec<VoxelKey> = Vec::new();
+                    for xi in -1..=1 {
+                        for yi in -1..=1 {
+                            for zi in -1..=1 {
+                                match self.search_method {
+                                    NeightborSearchMethod::Single => {
+                                        if xi == 0 && yi == 0 && zi == 0 {
+                                            search_voxel_keys.push((center_key.0, center_key.1, center_key.2));
+                                        }
+                                    },
+                                    NeightborSearchMethod::N27 => {
+                                        search_voxel_keys.push((center_key.0 + xi, center_key.1 + yi, center_key.2 + zi));
+                                    },
+                                    NeightborSearchMethod::N7 => {
+                                        if (xi.abs() + yi.abs() + zi.abs()) <= 1 {
+                                            search_voxel_keys.push((center_key.0 + xi, center_key.1 + yi, center_key.2 + zi));
+                                        }
+                                    },
+                                }
+                            }
+                        }
                     }
-                    (Matrix6::zeros(), Vector6::zeros(), 0.0)
+
+                    // 累積変数 (レジスタに乗って欲しい)
+                    let mut h_acc = Matrix6::zeros();
+                    let mut g_acc = Vector6::zeros();
+                    let mut score_acc = 0.0;
+                    for key in search_voxel_keys {
+                        if let Some(voxel) = target_grid.get_voxel_by_key(&key) {
+                            if !voxel.is_valid { continue; }
+                            let q = p_trans.coords - voxel.mean.coords; // 誤差ベクトル
+                            let mahal_sq = (q.transpose() * voxel.inv_cov * q)[0];                      // マハラノビス距離^2
+                            if mahal_sq > 10.0 { continue; }                                                 // 距離が遠すぎるなら無視
+                            let score_k = (-0.5 * mahal_sq).exp();                                      // 確率密度関数値
+                            let jacobian = Self::compute_point_jacobian(&p_trans);
+                            let qt_sigma_inv = q.transpose() * voxel.inv_cov;
+                            let g_k = -(qt_sigma_inv * jacobian).transpose() * score_k;
+                            g_acc += g_k;
+                            let h_k = -score_k * (jacobian.transpose() * voxel.inv_cov * jacobian);
+                            h_acc += h_k;
+                            score_acc += score_k;
+                        }
+                    }
+                    (h_acc, g_acc, score_acc)
                 })
                 .reduce(
                     || (Matrix6::zeros(), Vector6::zeros(), 0.0),
                     |(h1, g1, s1), (h2, g2, s2)| (h1 + h2, g1 + g2, s1 + s2)
                 );
-                
+            
             // solve for delta_x: H * delta_x = -g
             let mut h_copy = hessian;
             let lambda = 0.01; // damping factor (0.1 ~ 10.0)
@@ -117,6 +158,7 @@ impl NDTMatcher {
                 cb(i + 1, &current_transform, score);
             }
         }
+
         Some(current_transform)
     }
 
