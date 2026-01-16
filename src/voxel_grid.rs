@@ -147,6 +147,37 @@ impl VoxelGrid {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct VoxelGridFilter {
+    resolution: Scalar,
+    voxel_map: HashMap<(i32, i32, i32), Point>,
+}
+
+impl VoxelGridFilter {
+    pub fn new(resolution: Scalar) -> Self {
+        Self { resolution, voxel_map: HashMap::new() }
+    }
+
+    #[inline]
+    fn point_to_key(&self, p: &Point) -> (i32, i32, i32) {
+        let ix = (p.x / self.resolution).floor() as i32;
+        let iy = (p.y / self.resolution).floor() as i32;
+        let iz = (p.z / self.resolution).floor() as i32;
+        (ix, iy, iz)
+    }
+
+    pub fn filter(&mut self, cloud: &PointCloud) -> PointCloud {
+        self.voxel_map.clear();
+        for p in &cloud.points {
+            let key = self.point_to_key(p);
+            self.voxel_map.entry(key).or_insert(*p);
+        }
+        let filtered_points: Vec<Point> = self.voxel_map.values().cloned().collect();
+        PointCloud::new(filtered_points)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,20 +206,16 @@ mod tests {
         assert_relative_eq!(voxel.mean.y, 0.0);
         assert_relative_eq!(voxel.mean.z, 0.0);
 
-        // 分散共分散行列の対角成分 [Var(X), Var(Y), Var(Z)]
         let cov = voxel.cov;
         println!("Computed Covariance:\n{}", cov);
 
         // X軸分散は 2/3
         assert_relative_eq!(cov[(0, 0)], 2.0 / 3.0, epsilon = 1e-6);
 
-        // Y, Z軸分散は 0.0 だが、正則化処理で MIN_EIGEN_VALUE (0.001など) 以上になっているはず
-        // 完全に0だと逆行列が作れないため、ここが重要
         assert!(cov[(1, 1)] > 0.0); 
         assert!(cov[(2, 2)] > 0.0);
 
-        // C. 逆行列の検証
-        // 逆行列と元の行列を掛けると単位行列になるはず (inv * cov = I)
+        // 逆行列の検証: cov * inv_cov = I
         let identity_check = voxel.inv_cov * voxel.cov;
         assert_relative_eq!(identity_check[(0, 0)], 1.0, epsilon = 1e-4);
         assert_relative_eq!(identity_check[(1, 1)], 1.0, epsilon = 1e-4);

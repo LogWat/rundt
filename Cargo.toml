@@ -9,13 +9,14 @@ nalgebra = "0.34.1"
 # parallelism
 rayon = "1.10"
 # point cloud
-pcd-rs = "0.12"
+pcd-rs = { version = "0.12", features = ["derive"] }
 # visualization
 rerun = "0.28"
 # utilities
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
+clap ={ version = "4.5", features = ["derive"] }
 
 [dev-dependencies]
 approx = "0.5"

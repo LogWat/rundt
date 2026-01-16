@@ -41,14 +41,22 @@ impl NDTMatcher {
         self.step_size
     }
 
-    pub fn align(
+    pub fn align<F>(
         &self,
         source: &PointCloud,
         target_grid: &VoxelGrid,
         init_guess: na::Isometry3<Scalar>,
-        verbose: bool,
-    ) -> Option<na::Isometry3<Scalar>> {
+        mut step_callback: Option<F>, // callback for each step
+    ) -> Option<na::Isometry3<Scalar>> 
+    where 
+        F: FnMut(usize, &na::Isometry3<Scalar>, Scalar)
+    {
         let mut current_transform = init_guess;
+
+        if let Some(ref mut cb) = step_callback {
+            cb(0, &current_transform, 0.0);
+        }
+
         for i in 0..self.max_iterations {
             let (hessian, gradient, score) = source.points.par_iter()
                 .map(|point| {
@@ -95,15 +103,8 @@ impl NDTMatcher {
                     };
 
                     Self::update_pose(&mut current_transform, &final_delta, self.step_size);
-                    if verbose {
-                        println!("Iteration {}: score = {}, delta = {:?}", i, score, final_delta);
-                    }
 
                     if delta_norm < self.epsilon {
-                        if verbose {
-                            println!("Converged at iter {}", i);
-                            println!("Final score: {}", score);
-                        }
                         break;
                     }
                 },
@@ -112,9 +113,9 @@ impl NDTMatcher {
                     break;
                 }
             }
-        }
-        if verbose {
-            println!("iterations finished.");
+            if let Some(ref mut cb) = step_callback {
+                cb(i + 1, &current_transform, score);
+            }
         }
         Some(current_transform)
     }
@@ -196,7 +197,7 @@ mod tests {
 
         // align
         let result_pose = ndt.align(
-            &source_cloud_origin, &voxel_grid, init_guess, true
+            &source_cloud_origin, &voxel_grid, init_guess, Option::<fn(usize, &na::Isometry3<Scalar>, Scalar)>::None
         ).expect("NDT alignment failed");
 
         // 検証
