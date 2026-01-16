@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 # math
 nalgebra = "0.34.1"
+hashbrown = { version = "0.16", features = ["rayon"] }
 # parallelism
 rayon = "1.10"
 # point cloud
