@@ -2,7 +2,7 @@
 use nalgebra as na;
 use rayon::prelude::*;
 use crate::point_cloud::{PointCloud, Point, Scalar};
-use crate::voxel_grid::{VoxelGrid, VoxelKey};
+use crate::voxel_grid::{VoxelGrid};
 
 type Vector6 = na::SVector<Scalar, 6>;
 type Matrix6 = na::SMatrix<Scalar, 6, 6>;
@@ -75,47 +75,37 @@ impl NDTMatcher {
                     let p_trans = current_transform * point;
                     let center_key = target_grid.point_to_key(&p_trans);
 
-                    let mut search_voxel_keys: Vec<VoxelKey> = Vec::new();
-                    for xi in -1..=1 {
-                        for yi in -1..=1 {
-                            for zi in -1..=1 {
-                                match self.search_method {
-                                    NeightborSearchMethod::Single => {
-                                        if xi == 0 && yi == 0 && zi == 0 {
-                                            search_voxel_keys.push((center_key.0, center_key.1, center_key.2));
-                                        }
-                                    },
-                                    NeightborSearchMethod::N27 => {
-                                        search_voxel_keys.push((center_key.0 + xi, center_key.1 + yi, center_key.2 + zi));
-                                    },
-                                    NeightborSearchMethod::N7 => {
-                                        if (xi.abs() + yi.abs() + zi.abs()) <= 1 {
-                                            search_voxel_keys.push((center_key.0 + xi, center_key.1 + yi, center_key.2 + zi));
-                                        }
-                                    },
-                                }
-                            }
-                        }
-                    }
-
                     // 累積変数 (レジスタに乗って欲しい)
                     let mut h_acc = Matrix6::zeros();
                     let mut g_acc = Vector6::zeros();
                     let mut score_acc = 0.0;
-                    for key in search_voxel_keys {
-                        if let Some(voxel) = target_grid.get_voxel_by_key(&key) {
-                            if !voxel.is_valid { continue; }
-                            let q = p_trans.coords - voxel.mean.coords; // 誤差ベクトル
-                            let mahal_sq = (q.transpose() * voxel.inv_cov * q)[0];                      // マハラノビス距離^2
-                            if mahal_sq > 10.0 { continue; }                                                 // 距離が遠すぎるなら無視
-                            let score_k = (-0.5 * mahal_sq).exp();                                      // 確率密度関数値
-                            let jacobian = Self::compute_point_jacobian(&p_trans);
-                            let qt_sigma_inv = q.transpose() * voxel.inv_cov;
-                            let g_k = -(qt_sigma_inv * jacobian).transpose() * score_k;
-                            g_acc += g_k;
-                            let h_k = -score_k * (jacobian.transpose() * voxel.inv_cov * jacobian);
-                            h_acc += h_k;
-                            score_acc += score_k;
+                    let (x_range, y_range, z_range) = match self.search_method {
+                        NeightborSearchMethod::Single => (0..=0, 0..=0, 0..=0),
+                        NeightborSearchMethod::N27 => (-1..=1, -1..=1, -1..=1),
+                        NeightborSearchMethod::N7 => (-1..=1, -1..=1, -1..=1),
+                    };
+                    for xi in x_range {
+                        for yi in y_range.clone() {
+                            for zi in z_range.clone() {
+                                if let NeightborSearchMethod::N7 = self.search_method {
+                                    if (xi as i32).abs() + (yi as i32).abs() + (zi as i32).abs() > 1 { continue; }
+                                }
+                                let key = (center_key.0 + xi, center_key.1 + yi, center_key.2 + zi);
+                                if let Some(voxel) = target_grid.get_voxel_by_key(&key) {
+                                    if !voxel.is_valid { continue; }
+                                    let q = p_trans.coords - voxel.mean.coords; // 誤差ベクトル
+                                    let mahal_sq = (q.transpose() * voxel.inv_cov * q)[0];                      // マハラノビス距離^2
+                                    if mahal_sq > 10.0 { continue; }                                                 // 距離が遠すぎるなら無視
+                                    let score_k = (-0.5 * mahal_sq).exp();                                      // 確率密度関数値
+                                    let jacobian = Self::compute_point_jacobian(&p_trans);
+                                    let qt_sigma_inv = q.transpose() * voxel.inv_cov;
+                                    let g_k = -(qt_sigma_inv * jacobian).transpose() * score_k;
+                                    g_acc += g_k;
+                                    let h_k = -score_k * (jacobian.transpose() * voxel.inv_cov * jacobian);
+                                    h_acc += h_k;
+                                    score_acc += score_k;
+                                }
+                            }
                         }
                     }
                     (h_acc, g_acc, score_acc)
