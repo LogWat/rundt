@@ -25,7 +25,7 @@ impl NDTMatcher {
     pub fn new() -> Self {
         Self {
             max_iterations: 50,
-            epsilon: 1e-4,
+            epsilon: 1e-3,
             step_size: 1.0,
             search_method: NeightborSearchMethod::N27,
         }
@@ -88,7 +88,7 @@ impl NDTMatcher {
 
             if let Some(h_inv) = h_augmented.try_inverse() {
                 let mut delta = h_inv * gradient;
-                let norm = delta.norm(); // stepがデカすぎ
+                let norm = delta.norm(); // stepデカすぎ判定
                 if norm > 0.5 {
                     delta = delta.normalize() * 0.5;
                 }
@@ -125,7 +125,7 @@ impl NDTMatcher {
                 cb(iter, &current_transform, prev_score);
             }
             if lambda >= max_lambda {
-                println!("Warning: Lambda exceeded max at iter {}. Stopping.", iter);
+                println!("Diverged: lambda exceeded max at iter {}", iter);
                 break;
             }
         }
