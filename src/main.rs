@@ -84,8 +84,10 @@ fn main() -> Result<()>{
     let t = Instant::now();
     let mut voxel_filter = voxel_grid::VoxelGridFilter::new(args.leaf_size);
     let target_cloud = voxel_filter.filter(&target_raw);
+    phases.push(PhaseRow { name: "downsample (target)", dur: t.elapsed() });
+    let t = Instant::now();
     let source_cloud = voxel_filter.filter(&source_raw);
-    phases.push(PhaseRow { name: "downsample", dur: t.elapsed() });
+    phases.push(PhaseRow { name: "downsample (source)", dur: t.elapsed() });
 
     println!("Downsampled Target points: {}", target_cloud.len());
     println!("Downsampled Source points: {}", source_cloud.len());
