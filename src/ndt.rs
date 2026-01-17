@@ -7,6 +7,7 @@ use crate::voxel_grid::{VoxelGrid};
 type Vector6 = na::SVector<Scalar, 6>;
 type Matrix6 = na::SMatrix<Scalar, 6, 6>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NeightborSearchMethod {
     Single,
     N27,
@@ -64,92 +65,163 @@ impl NDTMatcher {
     {
         let mut current_transform = init_guess;
 
+        let mut lambda = 0.01; // damping factor
+        let min_lambda = 1e-6;
+        let max_lambda = 1e6;
+
+        let (mut hessian, mut gradient, mut prev_score) = Self::compute_derivatives(
+            &self, source, target_grid, &current_transform
+        );
+
         if let Some(ref mut cb) = step_callback {
             cb(0, &current_transform, 0.0);
         }
 
-        // let outlier_threshold = 0.05; // 確率密度がこれ以下なら勾配計算しない
-        for i in 0..self.max_iterations {
-            let (hessian, gradient, score) = source.points.par_iter()
-                .map(|point| {
-                    let p_trans = current_transform * point;
-                    let center_key = target_grid.point_to_key(&p_trans);
+        let mut iter = 0;
+        while iter < self.max_iterations {
+            iter += 1;
 
-                    // 累積変数 (レジスタに乗って欲しい)
-                    let mut h_acc = Matrix6::zeros();
-                    let mut g_acc = Vector6::zeros();
-                    let mut score_acc = 0.0;
-                    let (x_range, y_range, z_range) = match self.search_method {
-                        NeightborSearchMethod::Single => (0..=0, 0..=0, 0..=0),
-                        NeightborSearchMethod::N27 => (-1..=1, -1..=1, -1..=1),
-                        NeightborSearchMethod::N7 => (-1..=1, -1..=1, -1..=1),
-                    };
-                    for xi in x_range {
-                        for yi in y_range.clone() {
-                            for zi in z_range.clone() {
-                                if let NeightborSearchMethod::N7 = self.search_method {
-                                    if (xi as i32).abs() + (yi as i32).abs() + (zi as i32).abs() > 1 { continue; }
-                                }
-                                let key = (center_key.0 + xi, center_key.1 + yi, center_key.2 + zi);
-                                if let Some(voxel) = target_grid.get_voxel_by_key(&key) {
-                                    if !voxel.is_valid { continue; }
-                                    let q = p_trans.coords - voxel.mean.coords; // 誤差ベクトル
-                                    let mahal_sq = (q.transpose() * voxel.inv_cov * q)[0];                      // マハラノビス距離^2
-                                    if mahal_sq > 10.0 { continue; }                                                 // 距離が遠すぎるなら無視
-                                    let score_k = (-0.5 * mahal_sq).exp();                                      // 確率密度関数値
-                                    let jacobian = Self::compute_point_jacobian(&p_trans);
-                                    let qt_sigma_inv = q.transpose() * voxel.inv_cov;
-                                    let g_k = -(qt_sigma_inv * jacobian).transpose() * score_k;
-                                    g_acc += g_k;
-                                    let h_k = -score_k * (jacobian.transpose() * voxel.inv_cov * jacobian);
-                                    h_acc += h_k;
-                                    score_acc += score_k;
-                                }
-                            }
-                        }
-                    }
-                    (h_acc, g_acc, score_acc)
-                })
-                .reduce(
-                    || (Matrix6::zeros(), Vector6::zeros(), 0.0),
-                    |(h1, g1, s1), (h2, g2, s2)| (h1 + h2, g1 + g2, s1 + s2)
-                );
-            
-            // solve for delta_x: H * delta_x = -g
-            let mut h_copy = hessian;
-            let lambda = 0.01; // damping factor (0.1 ~ 10.0)
+            let mut h_augmented = -hessian;
             for k in 0..6 {
-                h_copy[(k, k)] += lambda;
+                h_augmented[(k, k)] += lambda;
             }
 
-            match h_copy.try_inverse() {
-                Some(h_inv) => {
-                    let delta = h_inv * -gradient;
-
-                    let delta_norm = delta.norm();
-                    let final_delta = if delta_norm > 0.5 {
-                        delta.normalize() * 0.5
-                    } else {
-                        delta
-                    };
-
-                    Self::update_pose(&mut current_transform, &final_delta, self.step_size);
-
-                    if delta_norm < self.epsilon {
+            if let Some(h_inv) = h_augmented.try_inverse() {
+                let mut delta = h_inv * gradient;
+                let norm = delta.norm(); // stepがデカすぎ
+                if norm > 0.5 {
+                    delta = delta.normalize() * 0.5;
+                }
+                // 仮更新
+                let mut trial_pose = current_transform;
+                Self::update_pose(&mut trial_pose, &delta);
+                let trial_score = Self::compute_score(&self, source, target_grid, &trial_pose);
+                // L-Mの受け入れ判定
+                if trial_score > prev_score {
+                    current_transform = trial_pose;
+                    prev_score = trial_score;
+                    lambda = (lambda * 0.1).max(min_lambda);
+                    let (h_new, g_new, _) = Self::compute_derivatives(
+                        &self, source, target_grid, &current_transform
+                    );
+                    hessian = h_new;
+                    gradient = g_new;
+                    if delta.norm() < self.epsilon {
+                        if let Some(ref mut cb) = step_callback {
+                            cb(iter, &current_transform, prev_score);
+                        }
+                        println!("Converged at iter {}: step norm = {}", iter, delta.norm());
                         break;
                     }
-                },
-                None => {
-                    eprintln!("Warning: Hessian inversion failed at iter {}. Stopping.", i);
-                    break;
+                } else {
+                    // step拒否
+                    lambda = (lambda * 10.0).min(max_lambda);
                 }
+            } else {
+                // 特異行列
+                lambda = (lambda * 10.0).min(max_lambda);
             }
             if let Some(ref mut cb) = step_callback {
-                cb(i + 1, &current_transform, score);
+                cb(iter, &current_transform, prev_score);
+            }
+            if lambda >= max_lambda {
+                println!("Warning: Lambda exceeded max at iter {}. Stopping.", iter);
+                break;
             }
         }
-
         Some(current_transform)
+    }
+
+
+    // returns (Hessian, Gradient, Score)
+    fn compute_derivatives(
+        &self,
+        source: &PointCloud,
+        target_grid: &VoxelGrid,
+        pose: &na::Isometry3<Scalar>,
+    ) -> (Matrix6, Vector6, Scalar) {
+        source.points.par_iter()
+        .map(|point| {
+            let p_trans = pose * point;
+            let center_key = target_grid.point_to_key(&p_trans);
+            let mut h_acc = Matrix6::zeros();
+            let mut g_acc = Vector6::zeros();
+            let mut score_acc = 0.0;
+            let range = match self.search_method {
+                NeightborSearchMethod::Single => (0..=0, 0..=0, 0..=0),
+                _ => (-1..=1, -1..=1, -1..=1),
+            };
+            for xi in range.0 {
+                for yi in range.1.clone() {
+                    for zi in range.2.clone() {
+                        if let NeightborSearchMethod::N7 = self.search_method {
+                            if (xi as i32).abs() + (yi as i32).abs() + (zi as i32).abs() > 1 { continue; }
+                        }
+                        let key = (center_key.0 + xi, center_key.1 + yi, center_key.2 + zi);
+                        if let Some(voxel) = target_grid.get_voxel_by_key(&key) {
+                            if !voxel.is_valid { continue; }
+
+                            let q = p_trans.coords - voxel.mean.coords;                                 // 誤差ベクトル
+                            let mahal_sq = (q.transpose() * voxel.inv_cov * q)[0];                      // マハラノビス距離^2
+                            if mahal_sq > 10.0 { continue; }                                            // 距離が遠すぎるなら無視
+                            let score_k = (-0.5 * mahal_sq).exp();                                      // 確率密度関数値
+                            let jacobian = Self::compute_point_jacobian(&p_trans);
+                            let qt_sigma_inv = q.transpose() * voxel.inv_cov;
+                            let g_k = -(qt_sigma_inv * jacobian).transpose() * score_k;
+                            let h_k = -score_k * (jacobian.transpose() * voxel.inv_cov * jacobian);
+                            g_acc += g_k;
+                            h_acc += h_k;
+                            score_acc += score_k;
+                        }
+                    }
+                }
+            }
+            (h_acc, g_acc, score_acc)
+        })
+        .reduce(
+            || (Matrix6::zeros(), Vector6::zeros(), 0.0),
+            |(h1, g1, s1), (h2, g2, s2)| (h1 + h2, g1 + g2, s1 + s2)
+        )
+    }
+
+
+    // returns score only
+    fn compute_score(
+        &self,
+        source: &PointCloud,
+        target_grid: &VoxelGrid,
+        pose: &na::Isometry3<Scalar>,
+    ) -> Scalar {
+        source.points.par_iter()
+        .map(|point| {
+            let p_trans = pose * point;
+            let center_key = target_grid.point_to_key(&p_trans);
+            let mut score_acc = 0.0;
+            let range = match self.search_method {
+                NeightborSearchMethod::Single => (0..=0, 0..=0, 0..=0),
+                _ => (-1..=1, -1..=1, -1..=1),
+            };
+            for xi in range.0 {
+                for yi in range.1.clone() {
+                    for zi in range.2.clone() {
+                        if let NeightborSearchMethod::N7 = self.search_method {
+                            if (xi as i32).abs() + (yi as i32).abs() + (zi as i32).abs() > 1 { continue; }
+                        }
+                        let key = (center_key.0 + xi, center_key.1 + yi, center_key.2 + zi);
+                        if let Some(voxel) = target_grid.get_voxel_by_key(&key) {
+                            if !voxel.is_valid { continue; }
+                            let q = p_trans.coords - voxel.mean.coords;       // 誤差ベクトル
+                            let mahal_sq = (q.transpose() * voxel.inv_cov * q)[0];                            // マハラノビス距離^2
+                            if mahal_sq > 10.0 { continue; }
+                            let score_k = (-0.5 * mahal_sq).exp();                                      // 確率密度関数値
+                            score_acc += score_k;
+                        }
+                    }
+                }
+            }
+            score_acc
+        })
+        .sum()
     }
 
     // 点pにおける 姿勢 x (6DoF) に対するヤコビ行列 (3x6)
@@ -166,15 +238,11 @@ impl NDTMatcher {
         jacobian
     }
 
-    fn update_pose(pose: &mut na::Isometry3<Scalar>, delta: &Vector6, step: Scalar) {
-        let translation = na::Translation3::new(
-            delta[0] * step, delta[1] * step, delta[2] * step
-        );
-        let rotation = na::UnitQuaternion::from_euler_angles(
-            delta[3] * step, delta[4] * step, delta[5] * step
-        );
-        let increment = na::Isometry3::from_parts(translation, rotation);
-        *pose = increment * (*pose);
+    fn update_pose(pose: &mut na::Isometry3<Scalar>, delta: &Vector6) {
+        let translation = na::Translation3::new(delta[0], delta[1], delta[2]);
+        let rotation = na::UnitQuaternion::from_euler_angles(delta[3], delta[4], delta[5]);
+        let delta_iso = na::Isometry3::from_parts(translation, rotation);
+        *pose = delta_iso * (*pose);
     }
 }
 
